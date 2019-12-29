@@ -1,3 +1,5 @@
+import collections
+import copy
 import credentials as cred
 import geopandas as gpd
 import json
@@ -14,6 +16,7 @@ from arcgis.mapping import WebMap
 from copy import deepcopy
 from logging.handlers import RotatingFileHandler
 from pandas import read_csv
+from pprint import pprint
 
 
 # intiate the logger and format it 
@@ -272,8 +275,121 @@ def create_map_add_views(views_dict, web_map_title ='web map title', web_map_sni
     item = gis.content.get(map_item.id)
     item.update(item_properties=item_properties)
 
+    return web_map_item
+
+def recur_dictify(frame):
+    # create the dict strcutre of layer groups
+    d = collections.OrderedDict()
+    if len(frame.columns) == 1:
+        if frame.values.size == 1: return frame.values[0][0]
+        return frame.values.squeeze()
+    grouped = frame.groupby(frame.columns[0], sort=False)
+    for k,g in grouped:
+        d[k] = recur_dictify(g.ix[:,1:]) 
+    return d
+
+def create_group(dict_strcture, template_group_json):
+    # create layer groups and set the visibility 
+    
+    # copy local template
+    base_json = copy.deepcopy(template_group_json)
+    
+    # rename the group
+    base_json['label'] = list(dict_strcture.keys())[0]
+    base_json['id'] = list(dict_strcture.keys())[0] 
+    
+    layer_list_json_group = []
+    for layer_list_index, layer_list in enumerate(dict_strcture[list(dict_strcture.keys())[0]].keys()):
+        # create local copy of the layer list json
+        local_layer_list_json = copy.deepcopy(template_widget_json)
+        
+        # set label of layer _list
+        local_layer_list_json['label'] = layer_list
+        
+        # set id of layer list 
+        local_layer_list_json['id'] = 'widgets_LayerList_Widget_' + str(list(dict_strcture.keys())[0]) + '_' + str(layer_list_index)
+        
+        # get the list of layers to show
+        try: 
+            subgroup_list = [map_layer_dict[x] for x in dict_strcture[list(dict_strcture.keys())[0]][layer_list]]
+
+            # set the visibility according to the dict
+            for lyr in local_layer_list_json['config']['layerOptions']:
+                if lyr in subgroup_list:
+                    local_layer_list_json['config']['layerOptions'][lyr]['display'] = True
+                else: 
+                    local_layer_list_json['config']['layerOptions'][lyr]['display'] = False
+        except:
+            pass
+
+        # add layer group to local list
+        layer_list_json_group.append(local_layer_list_json)
+    
+    # set the base widgets to the local list of groups
+    base_json['widgets'] = layer_list_json_group
+                 
+    return base_json 
 
 
+def create_layer_groups():
+    # create groups of the layers to display them in separate layer lists
+    # read csv file of the col hierarchy
+    df = pd.read_csv(csv_file_location)
+
+    # filter to the cols where views are required 
+    df = df[['Group', 'SubGroup', 'New_Code', 'Order']][df['has_view'] == 'yes']
+
+    # sort according to the provided order of the col\
+    #  as this order will be the same when adding the views to the map
+    df = df.sort_values(by='Order',ascending=False)
+
+    # create the layer dict structure
+    layer_strcture = recur_dictify(df)
+
+    print_text_log(layer_strcture)
+
+    # get local ids of the views within the map  
+    map_search = gis.content.search(web_map_title)
+    map_item = map_search[0]
+    map_json = map_item.get_data()
+    map_layer_dict = {}
+    for lyr in map_json['operationalLayers']:
+        if lyr['popupInfo']['fieldInfos'][2]['fieldName'] == 'WardCODE':
+            map_layer_dict[lyr['layerDefinition']['drawingInfo']['renderer']['field']+ '_ward'] = lyr['id']
+        elif lyr['popupInfo']['fieldInfos'][1]['fieldName'] == 'BoroughCOD':
+            map_layer_dict[lyr['layerDefinition']['drawingInfo']['renderer']['field']+ '_borough'] = lyr['id']
+        else:
+            print_text_log('layer_error')
+            print_text_log(lyr['layerDefinition']['drawingInfo']['renderer']['field'])
+            print_text_log(lyr['popupInfo']['fieldInfos'][2]['fieldName'])
+    print_text_log(map_layer_dict)
+
+    # get the json file from the app 
+    app_search = gis.content.search(web_app_title)
+    app_item = app_search[0]
+    app_json = app_item.get_data()
+
+    # copy the widget group json section
+    groups_json =  copy.deepcopy(app_json['widgetPool']['groups'])
+
+    # copy the widget group json section
+    template_group_json = copy.deepcopy(groups_json[0])
+
+    # copy the widget json section
+    template_widget_json = copy.deepcopy(template_group_json['widgets'][0])
+
+    # create layer groups 
+    app_json['widgetPool']['groups'] = [create_group(layer_strcture, template_widget_json)]
+
+    # set the "Keeps map extent and layers visibility while leaving the app." to false
+    app_json['keepAppState'] = False
+
+    # update web app json file
+    item_properties = {"text": json.dumps(app_json)}
+    item = gis.content.get(app_item.id)
+    item.update(item_properties=item_properties)
+
+    return "Done!"
 
 def update_func(lyr, target_feature):
     # func to try the update again after 5 seconds if it fails 
@@ -466,11 +582,4 @@ def update_all(lyr, csv_df, id_col = 'Identifier', list_of_update_col = ['Name',
         print_text_log(f"Feature {row[id_col]}, {index+1} out of {csv_df.shape[0]} is updated")
     print_text_log("Update completed!")
 
-
-
-
-
-
-
-
-
+##
